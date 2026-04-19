@@ -291,46 +291,11 @@ namespace ONQL
         // ----------------------------------------------------------------
         // Direct ORM-style API (insert / update / delete / onql / build)
         //
-        // `path` is a dotted string:
-        //   "mydb.users"        -> table `users` in database `mydb`
-        //   "mydb.users.u1"     -> record with id `u1`
+        // `query` arguments are ONQL expression strings, e.g.
+        //   "mydb.users[id=\"u1\"].id"
+        //   "mydb.orders[status=\"pending\"]"
+        // Use Build(template, values...) to substitute $1, $2, ...
         // ----------------------------------------------------------------
-
-        private readonly struct PathParts
-        {
-            public readonly string Db;
-            public readonly string Table;
-            public readonly string Id;
-            public PathParts(string db, string table, string id) { Db = db; Table = table; Id = id; }
-        }
-
-        private static PathParts ParsePath(string path, bool requireId)
-        {
-            if (string.IsNullOrEmpty(path))
-                throw new ArgumentException(
-                    "Path must be a non-empty string like \"db.table\" or \"db.table.id\"", nameof(path));
-            int dot1 = path.IndexOf('.');
-            if (dot1 <= 0 || dot1 == path.Length - 1)
-                throw new ArgumentException(
-                    $"Path \"{path}\" must contain at least \"db.table\"", nameof(path));
-            int dot2 = path.IndexOf('.', dot1 + 1);
-            string db = path.Substring(0, dot1);
-            string table, id;
-            if (dot2 == -1)
-            {
-                table = path.Substring(dot1 + 1);
-                id = string.Empty;
-            }
-            else
-            {
-                table = path.Substring(dot1 + 1, dot2 - dot1 - 1);
-                id = path.Substring(dot2 + 1);
-            }
-            if (requireId && string.IsNullOrEmpty(id))
-                throw new ArgumentException(
-                    $"Path \"{path}\" must include a record id: \"db.table.id\"", nameof(path));
-            return new PathParts(db, table, id);
-        }
 
         /// <summary>
         /// Parse the standard <c>{"error":"…","data":…}</c> envelope.
@@ -353,16 +318,14 @@ namespace ONQL
         }
 
         /// <summary>
-        /// Insert a single record at <paramref name="path"/> (e.g.
-        /// <c>"mydb.users"</c>). <paramref name="recordJson"/> is a
-        /// pre-serialized JSON object.
+        /// Insert a single record into <paramref name="db"/>.<paramref name="table"/>.
+        /// <paramref name="recordJson"/> is a pre-serialized JSON object.
         /// </summary>
-        public async Task<string> InsertAsync(string path, string recordJson)
+        public async Task<string> InsertAsync(string db, string table, string recordJson)
         {
-            var p = ParsePath(path, requireId: false);
             string payload = "{"
-                + "\"db\":"      + JsonEscape(p.Db)    + ","
-                + "\"table\":"   + JsonEscape(p.Table) + ","
+                + "\"db\":"      + JsonEscape(db)    + ","
+                + "\"table\":"   + JsonEscape(table) + ","
                 + "\"records\":" + recordJson
                 + "}";
             var res = await SendRequestAsync("insert", payload).ConfigureAwait(false);
@@ -370,22 +333,26 @@ namespace ONQL
         }
 
         /// <summary>
-        /// Update the record at <paramref name="path"/> (e.g.
-        /// <c>"mydb.users.u1"</c>). Uses <c>protopass = "default"</c>.
+        /// Update records in <c>db.table</c> matching <paramref name="query"/>.
+        /// Uses <c>protopass = "default"</c> and no explicit ids.
         /// </summary>
-        public Task<string> UpdateAsync(string path, string recordJson)
-            => UpdateAsync(path, recordJson, "default");
+        public Task<string> UpdateAsync(string db, string table, string recordJson, string query)
+            => UpdateAsync(db, table, recordJson, query, "default", "[]");
 
-        public async Task<string> UpdateAsync(string path, string recordJson, string protopass)
+        /// <summary>
+        /// Update records in <c>db.table</c>.
+        /// </summary>
+        /// <param name="query">ONQL query expression, or <c>""</c> when using <paramref name="idsJson"/>.</param>
+        /// <param name="idsJson">JSON array of explicit record IDs (e.g. <c>"[]"</c> or <c>"[\"u1\"]"</c>).</param>
+        public async Task<string> UpdateAsync(string db, string table, string recordJson,
+                                               string query, string protopass, string idsJson)
         {
-            var p = ParsePath(path, requireId: true);
-            string idsJson = "[" + JsonEscape(p.Id) + "]";
             string payload = "{"
-                + "\"db\":"        + JsonEscape(p.Db)       + ","
-                + "\"table\":"     + JsonEscape(p.Table)    + ","
-                + "\"records\":"   + recordJson             + ","
-                + "\"query\":\"\","
-                + "\"protopass\":" + JsonEscape(protopass)  + ","
+                + "\"db\":"        + JsonEscape(db)        + ","
+                + "\"table\":"     + JsonEscape(table)     + ","
+                + "\"records\":"   + recordJson            + ","
+                + "\"query\":"     + JsonEscape(query)     + ","
+                + "\"protopass\":" + JsonEscape(protopass) + ","
                 + "\"ids\":"       + idsJson
                 + "}";
             var res = await SendRequestAsync("update", payload).ConfigureAwait(false);
@@ -393,21 +360,19 @@ namespace ONQL
         }
 
         /// <summary>
-        /// Delete the record at <paramref name="path"/> (e.g.
-        /// <c>"mydb.users.u1"</c>). Uses <c>protopass = "default"</c>.
+        /// Delete records in <c>db.table</c> matching <paramref name="query"/>.
         /// </summary>
-        public Task<string> DeleteAsync(string path)
-            => DeleteAsync(path, "default");
+        public Task<string> DeleteAsync(string db, string table, string query)
+            => DeleteAsync(db, table, query, "default", "[]");
 
-        public async Task<string> DeleteAsync(string path, string protopass)
+        public async Task<string> DeleteAsync(string db, string table, string query,
+                                               string protopass, string idsJson)
         {
-            var p = ParsePath(path, requireId: true);
-            string idsJson = "[" + JsonEscape(p.Id) + "]";
             string payload = "{"
-                + "\"db\":"        + JsonEscape(p.Db)       + ","
-                + "\"table\":"     + JsonEscape(p.Table)    + ","
-                + "\"query\":\"\","
-                + "\"protopass\":" + JsonEscape(protopass)  + ","
+                + "\"db\":"        + JsonEscape(db)        + ","
+                + "\"table\":"     + JsonEscape(table)     + ","
+                + "\"query\":"     + JsonEscape(query)     + ","
+                + "\"protopass\":" + JsonEscape(protopass) + ","
                 + "\"ids\":"       + idsJson
                 + "}";
             var res = await SendRequestAsync("delete", payload).ConfigureAwait(false);
