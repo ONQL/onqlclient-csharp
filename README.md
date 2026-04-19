@@ -4,8 +4,23 @@ Official C# / .NET client for the ONQL database server.
 
 ## Installation
 
+### From NuGet
+
 ```bash
-dotnet add package ONQL.Client
+dotnet add package onql-client
+```
+
+Or in a `.csproj`:
+
+```xml
+<PackageReference Include="onql-client" Version="0.1.0" />
+```
+
+### From source (clone + reference)
+
+```bash
+git clone https://github.com/ONQL/onqlclient-csharp.git
+dotnet add reference ./onqlclient-csharp/ONQL.Client.csproj
 ```
 
 ## Quick Start
