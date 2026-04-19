@@ -6,7 +6,7 @@
     <LangVersion>8.0</LangVersion>
     <Nullable>enable</Nullable>
 
-    <PackageId>ONQL.Client</PackageId>
+    <PackageId>onql-client</PackageId>
     <Version>0.1.0</Version>
     <Authors>ONQL</Authors>
     <Company>ONQL</Company>
