@@ -30,49 +30,25 @@ using ONQL;
 
 var client = await ONQLClient.CreateAsync("localhost", 5656);
 
-// Execute a query
-var result = await client.SendRequestAsync("onql",
-    JsonSerializer.Serialize(new {
-        db = "mydb",
-        table = "users",
-        query = "name = \"John\""
-    }));
-Console.WriteLine(result.Payload);
+await client.InsertAsync("mydb.users", "{\"id\":\"u1\",\"name\":\"John\",\"age\":30}");
 
-// Subscribe to live updates
-var rid = await client.SubscribeAsync("", "name = \"John\"", (id, keyword, payload) => {
-    Console.WriteLine($"Update: {payload}");
-});
+string rows = await client.OnqlAsync("select * from mydb.users where age > 18");
+Console.WriteLine(rows);
 
-// Unsubscribe
-await client.UnsubscribeAsync(rid);
-
+await client.UpdateAsync("mydb.users.u1", "{\"age\":31}");
+await client.DeleteAsync("mydb.users.u1");
 await client.CloseAsync();
 ```
 
 ## API Reference
 
-### `ONQLClient.CreateAsync(host, port, options)`
+### `ONQLClient.CreateAsync(host, port, timeoutSeconds)`
 
 Creates and returns a connected client instance.
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `host` | `string` | `"localhost"` | Server hostname |
-| `port` | `int` | `5656` | Server port |
-| `timeout` | `TimeSpan` | `10s` | Default request timeout |
+### `client.SendRequestAsync(keyword, payload, timeoutMs?)`
 
-### `client.SendRequestAsync(keyword, payload, timeout?)`
-
-Sends a request and waits for a response.
-
-### `client.SubscribeAsync(onquery, query, callback)`
-
-Opens a streaming subscription. Returns the subscription ID.
-
-### `client.UnsubscribeAsync(rid)`
-
-Stops receiving events for a subscription.
+Sends a raw request frame and waits for a response.
 
 ### `client.CloseAsync()`
 
@@ -81,81 +57,54 @@ Closes the connection.
 ## Direct ORM-style API
 
 On top of raw `SendRequestAsync`, the client exposes convenience methods for
-the common `Insert` / `Update` / `Delete` / `Onql` operations. Each one
-builds the standard payload envelope for you and parses the `{error, data}`
-server envelope — throwing `InvalidOperationException` on a non-empty `error`
-field, returning the raw `data` substring on success.
+the `Insert` / `Update` / `Delete` / `Onql` operations. Each one builds the
+standard payload envelope for you and parses the `{error, data}` envelope —
+throwing `InvalidOperationException` on a non-empty `error`, returning the
+raw `data` substring on success.
 
-Because the driver is dependency-free, every JSON-valued parameter (records,
-query, ids, ctxvalues) is passed as a **pre-serialized JSON string**. Use
+Because the driver is dependency-free, every JSON-valued parameter (record,
+ctxvalues) is passed as a **pre-serialized JSON string**. Use
 `System.Text.Json`, Newtonsoft.Json, or any library you like to serialize.
 
-Call `client.Setup(db)` once to bind a default database name; every
-subsequent `InsertAsync` / `UpdateAsync` / `DeleteAsync` / `OnqlAsync` call
-will use it.
+The `path` argument is a **dotted string**:
 
-### `client.Setup(db)`
+| Path shape | Meaning |
+|------------|---------|
+| `"mydb.users"` | Table (used by `InsertAsync`) |
+| `"mydb.users.u1"` | Record id `u1` (used by `UpdateAsync` / `DeleteAsync`) |
 
-Sets the default database. Returns `this`, so calls can be chained.
+### `await client.InsertAsync(path, recordJson)`
+
+Insert a **single** record.
 
 ```csharp
-client.Setup("mydb");
+await client.InsertAsync("mydb.users",
+    "{\"id\":\"u1\",\"name\":\"John\",\"age\":30}");
 ```
 
-### `await client.InsertAsync(table, recordsJson)`
+### `await client.UpdateAsync(path, recordJson)` / `client.UpdateAsync(path, recordJson, protopass)`
 
-Insert one record or an array of records.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `table` | `string` | Target table |
-| `recordsJson` | `string` | JSON object, or array of objects |
-
-Returns the raw `data` substring of the server envelope.
+Update the record at `path`.
 
 ```csharp
-await client.InsertAsync("users", "{\"name\":\"John\",\"age\":30}");
-await client.InsertAsync("users", "[{\"name\":\"A\"},{\"name\":\"B\"}]");
+await client.UpdateAsync("mydb.users.u1", "{\"age\":31}");
+await client.UpdateAsync("mydb.users.u1", "{\"active\":false}", "admin");
 ```
 
-### `await client.UpdateAsync(table, recordsJson, queryJson)` / `client.UpdateAsync(table, recordsJson, queryJson, protopass, idsJson)`
+### `await client.DeleteAsync(path)` / `client.DeleteAsync(path, protopass)`
 
-Update records matching `queryJson`.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `table` | `string` | — | Target table |
-| `recordsJson` | `string` | — | JSON object of fields to update |
-| `queryJson` | `string` | — | JSON query |
-| `protopass` | `string` | `"default"` | Proto-pass profile |
-| `idsJson` | `string` | `"[]"` | JSON array of record IDs |
+Delete the record at `path`.
 
 ```csharp
-await client.UpdateAsync("users", "{\"age\":31}", "{\"name\":\"John\"}");
-await client.UpdateAsync("users", "{\"active\":false}", "{\"id\":\"u1\"}", "admin", "[]");
-```
-
-### `await client.DeleteAsync(table, queryJson)` / `client.DeleteAsync(table, queryJson, protopass, idsJson)`
-
-Delete records matching `queryJson`. Same semantics as `UpdateAsync`.
-
-```csharp
-await client.DeleteAsync("users", "{\"active\":false}");
+await client.DeleteAsync("mydb.users.u1");
 ```
 
 ### `await client.OnqlAsync(query)` / `client.OnqlAsync(query, protopass, ctxkey, ctxvaluesJson)`
 
 Run a raw ONQL query.
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `query` | `string` | — | ONQL query text |
-| `protopass` | `string` | `"default"` | Proto-pass profile |
-| `ctxkey` | `string` | `""` | Context key |
-| `ctxvaluesJson` | `string` | `"[]"` | JSON array of context values |
-
 ```csharp
-string data = await client.OnqlAsync("select * from users where age > 18");
+string data = await client.OnqlAsync("select * from mydb.users where age > 18");
 ```
 
 ### `client.Build(query, params object[] values)`
@@ -165,41 +114,16 @@ double-quoted; numbers and booleans are inlined verbatim.
 
 ```csharp
 string q = client.Build(
-    "select * from users where name = $1 and age > $2",
+    "select * from mydb.users where name = $1 and age > $2",
     "John", 18);
-// -> select * from users where name = "John" and age > 18
 string data = await client.OnqlAsync(q);
 ```
 
 ### `ONQLClient.ProcessResult(raw)`
 
-Static helper that parses the `{error, data}` envelope. Throws
-`InvalidOperationException` on non-empty `error`; returns the raw `data`
-substring on success. Useful when you prefer to build payloads yourself.
-
-### Full example
-
-```csharp
-using ONQL;
-
-var client = await ONQLClient.CreateAsync("localhost", 5656);
-client.Setup("mydb");
-
-await client.InsertAsync("users", "{\"name\":\"John\",\"age\":30}");
-
-string rows = await client.OnqlAsync(
-    client.Build("select * from users where age >= $1", 18)
-);
-Console.WriteLine(rows);
-
-await client.UpdateAsync("users", "{\"age\":31}", "{\"name\":\"John\"}");
-await client.DeleteAsync("users", "{\"name\":\"John\"}");
-await client.CloseAsync();
-```
+Static helper that parses the `{error, data}` envelope.
 
 ## Protocol
-
-The client communicates over TCP using a delimiter-based message format:
 
 ```
 <request_id>\x1E<keyword>\x1E<payload>\x04

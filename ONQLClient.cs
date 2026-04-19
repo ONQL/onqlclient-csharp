@@ -25,19 +25,9 @@ namespace ONQL
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ONQLResponse>> _pending
             = new ConcurrentDictionary<string, TaskCompletionSource<ONQLResponse>>();
 
-        private readonly ConcurrentDictionary<string, Action<string, string, string>> _subscriptions
-            = new ConcurrentDictionary<string, Action<string, string, string>>();
-
         private readonly int _defaultTimeoutMs;
         private readonly object _writeLock = new object();
         private volatile bool _disposed;
-
-        /// <summary>
-        /// Default database name used by <see cref="InsertAsync"/>,
-        /// <see cref="UpdateAsync"/>, <see cref="DeleteAsync"/>, and
-        /// <see cref="OnqlAsync"/>.
-        /// </summary>
-        private string _db = string.Empty;
 
         private ONQLClient(int defaultTimeoutMs)
         {
@@ -111,58 +101,6 @@ namespace ONQL
             finally
             {
                 _pending.TryRemove(rid, out _);
-            }
-        }
-
-        /// <summary>
-        /// Open a streaming subscription. All future frames matching this RID
-        /// will be delivered to <paramref name="callback"/>.
-        /// </summary>
-        /// <param name="onquery">ONQL 'onquery' string.</param>
-        /// <param name="query">ONQL query string.</param>
-        /// <param name="callback">Callback invoked as callback(rid, source, payload).</param>
-        /// <returns>The subscription request ID (use with <see cref="UnsubscribeAsync"/>).</returns>
-        public async Task<string> SubscribeAsync(
-            string onquery,
-            string query,
-            Action<string, string, string> callback)
-        {
-            if (_disposed || _stream == null)
-                throw new InvalidOperationException("Client is not connected.");
-
-            string rid = GenerateRequestId();
-            _subscriptions[rid] = callback;
-
-            // Build JSON payload: {"onquery":"...","query":"..."}
-            string jsonPayload = "{\"onquery\":" + JsonEscape(onquery)
-                               + ",\"query\":" + JsonEscape(query) + "}";
-
-            byte[] frame = BuildFrame(rid, "subscribe", jsonPayload);
-            await WriteBytesAsync(frame).ConfigureAwait(false);
-
-            return rid;
-        }
-
-        /// <summary>
-        /// Stop receiving events for a subscription.
-        /// </summary>
-        public async Task UnsubscribeAsync(string rid)
-        {
-            // Remove local handler first to avoid races
-            _subscriptions.TryRemove(rid, out _);
-
-            if (_disposed || _stream == null)
-                return;
-
-            try
-            {
-                string jsonPayload = "{\"rid\":" + JsonEscape(rid) + "}";
-                byte[] frame = BuildFrame(rid, "unsubscribe", jsonPayload);
-                await WriteBytesAsync(frame).ConfigureAwait(false);
-            }
-            catch
-            {
-                // Even if sending fails, we have removed the local handler.
             }
         }
 
@@ -301,24 +239,6 @@ namespace ONQL
             string source = parts[1];
             string payload = parts[2];
 
-            // Check subscription first
-            if (_subscriptions.TryGetValue(rid, out var callback))
-            {
-                // Dispatch without blocking the reader loop
-                Task.Run(() =>
-                {
-                    try
-                    {
-                        callback(rid, source, payload);
-                    }
-                    catch
-                    {
-                        // Swallow callback exceptions
-                    }
-                });
-                return;
-            }
-
             // Check pending one-shot request
             if (_pending.TryRemove(rid, out var tcs))
             {
@@ -370,17 +290,46 @@ namespace ONQL
 
         // ----------------------------------------------------------------
         // Direct ORM-style API (insert / update / delete / onql / build)
+        //
+        // `path` is a dotted string:
+        //   "mydb.users"        -> table `users` in database `mydb`
+        //   "mydb.users.u1"     -> record with id `u1`
         // ----------------------------------------------------------------
 
-        /// <summary>
-        /// Set the default database name used by <see cref="InsertAsync"/>,
-        /// <see cref="UpdateAsync"/>, <see cref="DeleteAsync"/>, and
-        /// <see cref="OnqlAsync"/>. Returns <c>this</c> so calls can be chained.
-        /// </summary>
-        public ONQLClient Setup(string db)
+        private readonly struct PathParts
         {
-            _db = db ?? string.Empty;
-            return this;
+            public readonly string Db;
+            public readonly string Table;
+            public readonly string Id;
+            public PathParts(string db, string table, string id) { Db = db; Table = table; Id = id; }
+        }
+
+        private static PathParts ParsePath(string path, bool requireId)
+        {
+            if (string.IsNullOrEmpty(path))
+                throw new ArgumentException(
+                    "Path must be a non-empty string like \"db.table\" or \"db.table.id\"", nameof(path));
+            int dot1 = path.IndexOf('.');
+            if (dot1 <= 0 || dot1 == path.Length - 1)
+                throw new ArgumentException(
+                    $"Path \"{path}\" must contain at least \"db.table\"", nameof(path));
+            int dot2 = path.IndexOf('.', dot1 + 1);
+            string db = path.Substring(0, dot1);
+            string table, id;
+            if (dot2 == -1)
+            {
+                table = path.Substring(dot1 + 1);
+                id = string.Empty;
+            }
+            else
+            {
+                table = path.Substring(dot1 + 1, dot2 - dot1 - 1);
+                id = path.Substring(dot2 + 1);
+            }
+            if (requireId && string.IsNullOrEmpty(id))
+                throw new ArgumentException(
+                    $"Path \"{path}\" must include a record id: \"db.table.id\"", nameof(path));
+            return new PathParts(db, table, id);
         }
 
         /// <summary>
@@ -404,44 +353,38 @@ namespace ONQL
         }
 
         /// <summary>
-        /// Insert one record or an array of records into <paramref name="table"/>.
-        /// The caller is responsible for JSON-serializing the record(s) into
-        /// <paramref name="recordsJson"/>.
+        /// Insert a single record at <paramref name="path"/> (e.g.
+        /// <c>"mydb.users"</c>). <paramref name="recordJson"/> is a
+        /// pre-serialized JSON object.
         /// </summary>
-        public async Task<string> InsertAsync(string table, string recordsJson)
+        public async Task<string> InsertAsync(string path, string recordJson)
         {
+            var p = ParsePath(path, requireId: false);
             string payload = "{"
-                + "\"db\":"      + JsonEscape(_db)    + ","
-                + "\"table\":"   + JsonEscape(table)  + ","
-                + "\"records\":" + recordsJson
+                + "\"db\":"      + JsonEscape(p.Db)    + ","
+                + "\"table\":"   + JsonEscape(p.Table) + ","
+                + "\"records\":" + recordJson
                 + "}";
             var res = await SendRequestAsync("insert", payload).ConfigureAwait(false);
             return ProcessResult(res.Payload);
         }
 
         /// <summary>
-        /// Update records in <paramref name="table"/> matching <paramref name="queryJson"/>.
-        /// Uses <c>protopass = "default"</c> and no explicit IDs.
+        /// Update the record at <paramref name="path"/> (e.g.
+        /// <c>"mydb.users.u1"</c>). Uses <c>protopass = "default"</c>.
         /// </summary>
-        public Task<string> UpdateAsync(string table, string recordsJson, string queryJson)
-            => UpdateAsync(table, recordsJson, queryJson, "default", "[]");
+        public Task<string> UpdateAsync(string path, string recordJson)
+            => UpdateAsync(path, recordJson, "default");
 
-        /// <summary>
-        /// Update records in <paramref name="table"/>.
-        /// </summary>
-        /// <param name="table">Target table.</param>
-        /// <param name="recordsJson">JSON object of fields to update.</param>
-        /// <param name="queryJson">JSON match query.</param>
-        /// <param name="protopass">Proto-pass profile.</param>
-        /// <param name="idsJson">JSON array of explicit record IDs (e.g. <c>"[]"</c>).</param>
-        public async Task<string> UpdateAsync(string table, string recordsJson, string queryJson,
-                                               string protopass, string idsJson)
+        public async Task<string> UpdateAsync(string path, string recordJson, string protopass)
         {
+            var p = ParsePath(path, requireId: true);
+            string idsJson = "[" + JsonEscape(p.Id) + "]";
             string payload = "{"
-                + "\"db\":"        + JsonEscape(_db)        + ","
-                + "\"table\":"     + JsonEscape(table)      + ","
-                + "\"records\":"   + recordsJson            + ","
-                + "\"query\":"     + queryJson              + ","
+                + "\"db\":"        + JsonEscape(p.Db)       + ","
+                + "\"table\":"     + JsonEscape(p.Table)    + ","
+                + "\"records\":"   + recordJson             + ","
+                + "\"query\":\"\","
                 + "\"protopass\":" + JsonEscape(protopass)  + ","
                 + "\"ids\":"       + idsJson
                 + "}";
@@ -450,22 +393,20 @@ namespace ONQL
         }
 
         /// <summary>
-        /// Delete records in <paramref name="table"/> matching <paramref name="queryJson"/>.
-        /// Uses <c>protopass = "default"</c> and no explicit IDs.
+        /// Delete the record at <paramref name="path"/> (e.g.
+        /// <c>"mydb.users.u1"</c>). Uses <c>protopass = "default"</c>.
         /// </summary>
-        public Task<string> DeleteAsync(string table, string queryJson)
-            => DeleteAsync(table, queryJson, "default", "[]");
+        public Task<string> DeleteAsync(string path)
+            => DeleteAsync(path, "default");
 
-        /// <summary>
-        /// Delete records in <paramref name="table"/>.
-        /// </summary>
-        public async Task<string> DeleteAsync(string table, string queryJson,
-                                               string protopass, string idsJson)
+        public async Task<string> DeleteAsync(string path, string protopass)
         {
+            var p = ParsePath(path, requireId: true);
+            string idsJson = "[" + JsonEscape(p.Id) + "]";
             string payload = "{"
-                + "\"db\":"        + JsonEscape(_db)        + ","
-                + "\"table\":"     + JsonEscape(table)      + ","
-                + "\"query\":"     + queryJson              + ","
+                + "\"db\":"        + JsonEscape(p.Db)       + ","
+                + "\"table\":"     + JsonEscape(p.Table)    + ","
+                + "\"query\":\"\","
                 + "\"protopass\":" + JsonEscape(protopass)  + ","
                 + "\"ids\":"       + idsJson
                 + "}";
@@ -480,13 +421,6 @@ namespace ONQL
         public Task<string> OnqlAsync(string query)
             => OnqlAsync(query, "default", "", "[]");
 
-        /// <summary>
-        /// Execute a raw ONQL query.
-        /// </summary>
-        /// <param name="query">ONQL query text.</param>
-        /// <param name="protopass">Proto-pass profile.</param>
-        /// <param name="ctxkey">Context key.</param>
-        /// <param name="ctxvaluesJson">JSON array of context values.</param>
         public async Task<string> OnqlAsync(string query, string protopass,
                                              string ctxkey, string ctxvaluesJson)
         {
