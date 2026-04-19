@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>ONQL</RootNamespace>
+    <LangVersion>8.0</LangVersion>
+    <Nullable>enable</Nullable>
+
+    <PackageId>ONQL.Client</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>ONQL</Authors>
+    <Company>ONQL</Company>
+    <Description>ONQL TCP client driver for .NET</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/ONQL/onqlclient-csharp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ONQL/onqlclient-csharp</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>onql;tcp;client;database</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
