@@ -2,8 +2,8 @@ name: Publish to NuGet
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
@@ -26,7 +26,7 @@ jobs:
       - name: Pack
         run: dotnet pack ONQL.Client.csproj --configuration Release --no-build -o nupkg
 
-      - name: Push to NuGet
+      - name: Push to NuGet (skip if already published)
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
